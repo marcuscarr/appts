@@ -17,7 +17,7 @@ func (s *Server) createTrainer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.db.Create(&trainer)
-	err = json.NewEncoder(w).Encode(trainer)
+	err := json.NewEncoder(w).Encode(trainer)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

@@ -128,7 +128,7 @@ func (s *Server) getUserAppts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	appts := user.Appts
-	err json.NewEncoder(w).Encode(appts)
+	err = json.NewEncoder(w).Encode(appts)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
