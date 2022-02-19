@@ -1,0 +1,8 @@
+---
+linters:
+  enable:
+    - decorder
+    - gofumpt
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
