@@ -4,8 +4,9 @@ GOCMD=go
 GOTEST=$(GOCMD) test
 GOVET=$(GOCMD) vet
 BINARY_NAME=appts
+IMAGE_NAME=appts
 VERSION?=0.0.0
-SERVICE_PORT?=3000
+SERVICE_PORT?=8000
 DOCKER_REGISTRY?= #if set it should finished by /
 
 GREEN  := $(shell tput -Txterm setaf 2)
@@ -72,3 +73,15 @@ help: ## Show this help.
 		if (/^[a-zA-Z_-]+:.*?##.*$$/) {printf "    ${YELLOW}%-20s${GREEN}%s${RESET}\n", $$1, $$2} \
 		else if (/^## .*$$/) {printf "  ${CYAN}%s${RESET}\n", substr($$1,4)} \
 		}' $(MAKEFILE_LIST)
+
+## Docker
+build-docker:
+	docker build --rm --tag $(IMAGE_NAME) .
+
+start-docker: build-docker
+	./scripts/env.sh docker-compose up -d
+
+stop-docker:
+	./scripts/env.sh docker-compose down
+
+restart-docker: stop-docker start-docker

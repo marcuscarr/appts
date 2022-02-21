@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    restart: always
+    image: ${IMAGE_NAME}:${IMAGE_TAG}
+    ports:
+      - ${PORT}:8080
+    environment:
+      HOST: ${HOST}
+      PORT: ${PORT}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      POSTGRES_DATA_DIR: ${POSTGRES_DATA_DIR}
+
+  db:
+    image: postgres:14.2
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+    restart: always
+    ports:
+      - 50543:5432

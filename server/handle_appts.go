@@ -2,128 +2,132 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/go-playground/validator"
 	"github.com/gorilla/mux"
+	"gorm.io/gorm"
+
 	"github.com/marcuscarr/appts/models"
 )
 
 const (
 	apptDuration = 30 * time.Minute
 	locale       = "America/Los_Angeles"
-
-	dateFormat = "2006-01-02"
-	timeFormat = "15:04:05-07:00"
 )
 
 var (
 	location, _ = time.LoadLocation(locale)
 	startOfDay  = time.Date(0, 0, 0, 8, 0, 0, 0, location)
 	endOfDay    = time.Date(0, 0, 0, 17, 0, 0, 0, location)
+	// use a single instance of Validate, it caches struct info
 )
 
-func (s *Server) createAppt(w http.ResponseWriter, r *http.Request) {
-	// TODO: Add validation of time, duration and availaility.
+type apptHandler struct {
+	*modelHandler
+	validator *validator.Validate
+}
 
+func newApptHandler(db *gorm.DB) *apptHandler {
+	validate := validator.New()
+	return &apptHandler{
+		modelHandler: newModelHandler(
+			db, &models.Appt{}, "id",
+			[]queries{
+				{"user_id", "="},
+				{"trainer_id", "="},
+				{"start_time", ">="},
+				{"end_time", "<"},
+			},
+		),
+		validator: validate,
+	}
+}
+
+func (ah *apptHandler) create(w http.ResponseWriter, r *http.Request) {
+	// TODO: Validate request.
 	var appt models.Appt
+
 	if err := json.NewDecoder(r.Body).Decode(&appt); err != nil {
+		log.Printf("Error decoding body: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	s.db.Create(&appt)
+	if err := validAppt(ah.validator, appt); err != nil {
+		log.Printf("Invalid appt: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	txErr := ah.db.Transaction(func(tx *gorm.DB) error {
+		isAvailable, err := availableAppt(tx, appt)
+		if err != nil {
+			log.Printf("Error checking if appt is available: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return err
+		}
+
+		if !isAvailable {
+			log.Printf("Appt is not available")
+			w.WriteHeader(http.StatusConflict)
+			return errors.New("appt is not available")
+		}
+
+		if appt.ID != 0 {
+			var apptValue interface{} = &appt
+			result := ah.modelHandler.createWithID(tx, apptValue)
+			if result != nil {
+				log.Printf("Error creating appt: %v", result)
+				w.WriteHeader(http.StatusInternalServerError)
+				return result
+			}
+		} else {
+			result := tx.Create(&appt)
+			if result.Error != nil {
+				log.Printf("Error creating appt: %v", result.Error)
+				w.WriteHeader(http.StatusInternalServerError)
+				return result.Error
+			}
+		}
+
+		return nil
+	})
+	if txErr != nil {
+		w.Write([]byte(txErr.Error()))
+		return
+	}
+
 	err := json.NewEncoder(w).Encode(appt)
 	if err != nil {
+		log.Printf("Error encoding appt: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 }
 
-func (s *Server) getAppts(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-
-	var wheres []string
-	var args []interface{}
-
-	if trainerID := query.Get(trainerIDParam); trainerID != "" {
-		parsed, err := strconv.Atoi(trainerID)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		wheres = append(wheres, "trainer_id = ?")
-		args = append(args, parsed)
-	}
-
-	if userID := query.Get(userIDParam); userID != "" {
-		parsed, err := strconv.Atoi(userID)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		wheres = append(wheres, "user_id = ?")
-		args = append(args, parsed)
-	}
-
-	var appts []models.Appt
-
-	if len(wheres) > 0 {
-		where := strings.Join(wheres, " AND ")
-		s.db.Where(where, args...).Find(&appts)
-	} else {
-		s.db.Find(&appts)
-	}
-
-	err := json.NewEncoder(w).Encode(appts)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-}
-
-func (s *Server) getAppt(w http.ResponseWriter, r *http.Request) {
+func (ah *apptHandler) updateAppt(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	idParam := vars[apptIDParam]
-	id, err := strconv.Atoi(idParam)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	var appt models.Appt
-	s.db.First(&appt, id)
-
-	if appt.ID == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	err = json.NewEncoder(w).Encode(appt)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-}
-
-func (s *Server) updateAppt(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	idParam := vars[apptIDParam]
-	id, err := strconv.Atoi(idParam)
+	idValue := vars[apptIDParam]
+	id, err := strconv.Atoi(idValue)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	var existingAppt models.Appt
-	s.db.First(&existingAppt, id)
+	if result := ah.db.First(&existingAppt, id); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			ah.create(w, r)
+			return
+		}
 
-	if existingAppt.ID == 0 {
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -134,159 +138,56 @@ func (s *Server) updateAppt(w http.ResponseWriter, r *http.Request) {
 	}
 	appt.ID = uint(id)
 
-	s.db.Model(&appt).Updates(appt)
+	if err := validAppt(ah.validator, appt); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	txErr := ah.db.Transaction(func(tx *gorm.DB) error {
+		isAvailable, err := availableAppt(tx, appt)
+		if err != nil {
+			log.Printf("Error checking if appt is available: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return err
+		}
+
+		if !isAvailable {
+			log.Printf("Appt is not available")
+			w.WriteHeader(http.StatusConflict)
+			return errors.New("appt is not available")
+		}
+
+		result := tx.Save(&appt)
+		if result.Error != nil {
+			log.Printf("Error updating appt: %v", result.Error)
+			w.WriteHeader(http.StatusInternalServerError)
+			return result.Error
+		}
+
+		return nil
+	})
+
+	if txErr != nil {
+		w.Write([]byte(txErr.Error()))
+		return
+	}
+
 	err = json.NewEncoder(w).Encode(appt)
 	if err != nil {
+		log.Printf("Error encoding appt: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) deleteAppt(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	idParam := vars[apptIDParam]
-	id, err := strconv.Atoi(idParam)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
+func availableAppt(db *gorm.DB, appt models.Appt) (bool, error) {
+	var existing []models.Appt
+	result := db.Where("trainer_id = ? AND start_time = ?", appt.TrainerID, appt.StartTime).First(&existing)
+	if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return false, result.Error
 	}
 
-	var appt models.Appt
-	s.db.First(&appt, id)
-
-	if appt.ID == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	s.db.Delete(&appt)
-}
-
-func (s *Server) getAvailableAppts(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-
-	var wheres []string
-	var args []interface{}
-
-	if trainerID := query.Get(trainerIDParam); trainerID != "" {
-		parsed, err := strconv.Atoi(trainerID)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		wheres = append(wheres, "trainer_id = ?")
-		args = append(args, parsed)
-	} else {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	var start time.Time
-	if startDate := query.Get(startDateParam); startDate != "" {
-		parsed, err := time.Parse(dateFormat, startDate)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		wheres = append(wheres, "start_time >= ?")
-		args = append(args, parsed)
-		start = parsed
-	} else {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	var end time.Time
-	if endDate := query.Get(endDateParam); endDate != "" {
-		parsedDate, err := time.Parse(dateFormat, endDate)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		// Add one day to make the range inclusive.
-		parsed := parsedDate.AddDate(0, 0, 1)
-
-		wheres = append(wheres, "end_time < ?")
-		args = append(args, parsed)
-		end = parsed
-	} else {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	where := strings.Join(wheres, " AND ")
-
-	var appts []models.Appt
-	s.db.Where(where, args...).Find(&appts)
-
-	unavailable := make(map[time.Time]struct{})
-	for _, appt := range appts {
-		unavailable[appt.StartTime] = struct{}{}
-	}
-
-	var available []time.Time
-	nextAppt := time.Date(
-		start.Year(), start.Month(), start.Day(),
-		startOfDay.Hour(), startOfDay.Minute(), startOfDay.Second(), 0, location,
-	)
-	for nextAppt.Before(end) {
-		if _, ok := unavailable[nextAppt]; !ok && hourMinuteBetween(startOfDay, endOfDay, nextAppt) {
-			available = append(available, nextAppt)
-		}
-		nextAppt = nextAppt.Add(apptDuration)
-	}
-	var res []string
-	for _, a := range available {
-		res = append(res, a.Format(timeFormat))
-	}
-
-	err := json.NewEncoder(w).Encode(map[string][]string{"available": res})
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-}
-
-func buildAvailable(start, end time.Time, appts []models.Appt) []time.Time {
-	unavailable := make(map[time.Time]struct{})
-	for _, appt := range appts {
-		unavailable[appt.StartTime] = struct{}{}
-	}
-
-	var available []time.Time
-	nextAppt := time.Date(
-		start.Year(), start.Month(), start.Day(),
-		startOfDay.Hour(), startOfDay.Minute(), startOfDay.Second(), 0, location,
-	)
-	for nextAppt.Before(end) {
-		if !isUnavailable(nextAppt, unavailable) && hourMinuteBetween(startOfDay, endOfDay, nextAppt) {
-			available = append(available, nextAppt)
-		}
-		nextAppt = nextAppt.Add(apptDuration)
-	}
-
-	return available
-}
-
-func isUnavailable(t time.Time, unavailable map[time.Time]struct{}) bool {
-	_, ok := unavailable[t]
-	return ok
-}
-
-func hourMinuteBetween(start, end, check time.Time) bool {
-	if start.Hour() < check.Hour() && end.Hour() > check.Hour() {
-		return true
-	}
-
-	if start.Hour() == check.Hour() && start.Minute() <= check.Minute() {
-		return true
-	}
-
-	if end.Hour() == check.Hour() && end.Minute() >= check.Minute() {
-		return true
-	}
-
-	return false
+	return len(existing) == 0, nil
 }

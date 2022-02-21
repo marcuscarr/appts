@@ -8,31 +8,33 @@ import (
 
 type Appt struct {
 	gorm.Model
-	StartTime time.Time
-	EndTime   time.Time
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID uint `gorm:"primary_key;AUTO_INCREMENT"`
 
-	User    User
-	Trainer Trainer
+	StartTime time.Time `json:"start_time" validate:"required" gorm:"not null"`
+	EndTime   time.Time `json:"end_time" validate:"required,gtfield=StartTime" gorm:"not null"`
+
+	UserID    uint `json:"user_id" validate:"required" gorm:"not null,index"`
+	TrainerID uint `json:"trainer_id" validate:"required" gorm:"not null,index"`
 }
 
 type User struct {
 	gorm.Model
-	Name      string
-	Email     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID uint `gorm:"primary_key;AUTO_INCREMENT"`
+
+	Name     string `gorm:"not null"`
+	Email    string `gorm:"not null"`
+	Username string `gorm:"not null,unique"`
 
 	Appts []Appt `gorm:"constraint:ON DELETE CASCADE;"`
 }
 
 type Trainer struct {
 	gorm.Model
-	Name      string
-	Email     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID uint `gorm:"primary_key;AUTO_INCREMENT"`
+
+	Name     string `gorm:"not null"`
+	Email    string `gorm:"not null"`
+	Username string `gorm:"not null,unique"`
 
 	Appts []Appt `gorm:"constraint:ON DELETE CASCADE;"`
 }

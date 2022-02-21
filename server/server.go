@@ -1,93 +1,284 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync"
+	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/marcuscarr/appts/models"
-	"gorm.io/driver/sqlite"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	"github.com/marcuscarr/appts/models"
 )
 
 const (
 	// Params
+	idParam        = "id"
 	apptIDParam    = "appt_id"
 	trainerIDParam = "trainer_id"
 	userIDParam    = "user_id"
-	startDateParam = "start_date"
-	endDateParam   = "end_date"
+	startsAtParam  = "starts_at"
+	endsAtParam    = "ends_at"
 )
 
 type Server struct {
-	db     *gorm.DB
-	router *mux.Router
+	http.Server
+	db      *gorm.DB
+	router  *mux.Router
+	closers []io.Closer
+	config  *Config
+}
+
+type Config struct {
+	Host    string
+	Port    int
+	DBHost  string
+	DBPort  int
+	DBUser  string
+	DBPass  string
+	DBName  string
+	Timeout time.Duration
 }
 
 func (s *Server) routes() {
+	s.router.HandleFunc("/healthz", s.healthz).Methods("GET")
+
+	apptHandler := newApptHandler(s.db)
 	apptsRouter := s.router.PathPrefix("/appointments").Subrouter()
 
-	apptsRouter.HandleFunc("", s.createAppt).Methods("POST")
-	apptsRouter.HandleFunc("", s.getAppts).Methods("GET")
+	apptsRouter.HandleFunc("", apptHandler.create).Methods("POST")
+	apptsRouter.HandleFunc("", apptHandler.list).Methods("GET")
 
-	apptIDRoute := fmt.Sprintf("/{%s}", apptIDParam)
-	apptsRouter.HandleFunc(apptIDRoute, s.getAppt).Methods("GET")
-	apptsRouter.HandleFunc(apptIDRoute, s.updateAppt).Methods("PUT")
-	apptsRouter.HandleFunc(apptIDRoute, s.deleteAppt).Methods("DELETE")
+	apptIDRoute := fmt.Sprintf("/{%s}", idParam)
+	apptsRouter.HandleFunc(apptIDRoute, apptHandler.get).Methods("GET")
+	apptsRouter.HandleFunc(apptIDRoute, apptHandler.update).Methods("PUT")
+	apptsRouter.HandleFunc(apptIDRoute, apptHandler.delete).Methods("DELETE")
 
+	trainerHandler := newTrainerHandler(s.db)
 	trainersRouter := s.router.PathPrefix("/trainers").Subrouter()
 
-	trainersRouter.HandleFunc("", s.createTrainer).Methods("POST")
-	trainersRouter.HandleFunc("", s.getTrainers).Methods("GET")
+	trainersRouter.HandleFunc("", trainerHandler.create).Methods("POST")
+	trainersRouter.HandleFunc("", trainerHandler.get).Methods("GET")
 
-	trainerIDRoute := fmt.Sprintf("/{%s}", trainerIDParam)
-	trainersRouter.HandleFunc(trainerIDRoute, s.getTrainer).Methods("GET")
-	trainersRouter.HandleFunc(trainerIDRoute, s.updateTrainer).Methods("PUT")
-	trainersRouter.HandleFunc(trainerIDRoute, s.deleteTrainer).Methods("DELETE")
+	trainerIDRoute := fmt.Sprintf("/{%s}", idParam)
+	trainersRouter.HandleFunc(trainerIDRoute, trainerHandler.list).Methods("GET")
+	trainersRouter.HandleFunc(trainerIDRoute, trainerHandler.update).Methods("PUT")
+	trainersRouter.HandleFunc(trainerIDRoute, trainerHandler.delete).Methods("DELETE")
 
-	trainerApptsRouter := trainersRouter.PathPrefix("/appointments").Subrouter()
-	trainerApptsRouter.HandleFunc("", s.getAppts).Methods("GET")
-	trainerApptsRouter.HandleFunc("/available", s.getAvailableAppts).
+	trainerApptsRoute := fmt.Sprintf("/{%s}/appointments", trainerIDParam)
+	trainersRouter.HandleFunc(trainerApptsRoute, apptHandler.list).Methods("GET")
+	trainersRouter.HandleFunc(trainerApptsRoute+"/available", trainerHandler.getAvailableAppts).
 		Methods("GET").
 		Queries(
-			startDateParam, fmt.Sprintf("{%s}", startDateParam),
-			endDateParam, fmt.Sprintf("{%s}", endDateParam),
+			startsAtParam, fmt.Sprintf("{%s}", startsAtParam),
+			endsAtParam, fmt.Sprintf("{%s}", endsAtParam),
 		)
 
+	userHandler := newUserHandler(s.db)
 	usersRouter := s.router.PathPrefix("/users").Subrouter()
 
-	usersRouter.HandleFunc("", s.createUser).Methods("POST")
-	usersRouter.HandleFunc("", s.getUsers).Methods("GET")
+	usersRouter.HandleFunc("", userHandler.create).Methods("POST")
+	usersRouter.HandleFunc("", userHandler.list).Methods("GET")
 
-	userIDRoute := fmt.Sprintf("/{%s}", userIDParam)
-	usersRouter.HandleFunc(userIDRoute, s.getUser).Methods("GET")
-	usersRouter.HandleFunc(userIDRoute, s.updateUser).Methods("PUT")
-	usersRouter.HandleFunc(userIDRoute, s.deleteUser).Methods("DELETE")
+	userIDRoute := fmt.Sprintf("/{%s}", idParam)
+	usersRouter.HandleFunc(userIDRoute, userHandler.get).Methods("GET")
+	usersRouter.HandleFunc(userIDRoute, userHandler.update).Methods("PUT")
+	usersRouter.HandleFunc(userIDRoute, userHandler.delete).Methods("DELETE")
 
-	usersRouter.HandleFunc(userIDRoute+"/appointments", s.getAppts).Methods("GET")
+	usersRouter.HandleFunc(userIDRoute+"/appointments", apptHandler.list).Methods("GET")
 }
 
-func newServer() *Server {
-	db, err := gorm.Open(sqlite.Open("appointments.db"), &gorm.Config{})
+func New(config *Config) *Server {
+	// Connect to the postgres instance
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s sslmode=disable",
+		config.DBHost, strconv.Itoa(config.DBPort), config.DBUser, config.DBPass,
+	)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create the database if it doesn't exist
+	db = db.Exec(fmt.Sprintf(`
+		SELECT 'CREATE DATABASE %s'
+		WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s');
+	`, config.DBName, config.DBName))
+	if db.Error != nil {
+		log.Fatal(db.Error)
+	}
+
+	dbConn, err := db.DB()
+	if err != nil {
+		log.Fatal(err)
+	}
+	dbConn.Close()
+
+	// Connect to the database
+	dsn = fmt.Sprintf(
+		"host=%s port=%s user=%s dbname=%s password=%s sslmode=disable TimeZone=UTC",
+		config.DBHost, strconv.Itoa(config.DBPort), config.DBUser, config.DBName, config.DBPass,
+	)
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
 
-	err = db.AutoMigrate(&models.Appt{}, &models.User{}, &models.Trainer{})
+	// Migrate the schema
+	err = db.AutoMigrate(&models.User{}, &models.Trainer{}, &models.Appt{})
 	if err != nil {
 		panic(err)
 	}
 
-	router := mux.NewRouter()
+	// Get the database connection for closing
+	dbConn, err = db.DB()
+	if err != nil {
+		panic(err)
+	}
 
+	// Create the server
+	r := mux.NewRouter()
 	s := &Server{
-		db:     db,
-		router: router,
+		Server: http.Server{
+			Addr:         fmt.Sprintf("%s:%d", config.Host, config.Port),
+			WriteTimeout: 15 * time.Second,
+			ReadTimeout:  15 * time.Second,
+			IdleTimeout:  60 * time.Second,
+			Handler:      r,
+		},
+		db:      db,
+		closers: []io.Closer{dbConn},
+		router:  r,
 	}
-
 	s.routes()
 
-	return &Server{
-		db:     db,
-		router: mux.NewRouter(),
+	return s
+}
+
+func (s *Server) Run() {
+	defer close(s.closers...)
+
+	// Run our server in a goroutine so that it doesn't block.
+	go func() {
+		log.Printf("Starting server on %s\n", s.Addr)
+		if err := s.ListenAndServe(); err != nil {
+			log.Println(err)
+		}
+	}()
+
+	c := make(chan os.Signal, 1)
+	// We'll accept graceful shutdowns when quit via SIGINT (Ctrl+C).
+	// SIGKILL, SIGQUIT or SIGTERM (Ctrl+/) will not be caught.
+	signal.Notify(c, os.Interrupt)
+
+	// Block until we receive our signal.
+	<-c
+
+	// Create a deadline to wait for.
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.Timeout)
+	defer cancel()
+
+	// Doesn't block if no connections, but will otherwise wait until the timeout deadline.
+	s.Shutdown(ctx)
+
+	log.Println("shutting down")
+	os.Exit(0)
+}
+
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+func close(closers ...io.Closer) {
+	var wg sync.WaitGroup
+	wg.Add(len(closers))
+	for _, c := range closers {
+		go func(c io.Closer) {
+			defer wg.Done()
+			if err := c.Close(); err != nil {
+				log.Println(err)
+			}
+		}(c)
 	}
+
+	wg.Wait()
+}
+
+func (s *Server) insertModel(w http.ResponseWriter, model interface{}) {
+	result := s.db.Create(model)
+	if result.Error != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err := json.NewEncoder(w).Encode(model)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) getModel(w http.ResponseWriter, model interface{}, idValue string) {
+	id, err := strconv.Atoi(idValue)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	result := s.db.First(model, id)
+	if result.Error != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	err = json.NewEncoder(w).Encode(model)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) updateModel(model interface{}, w http.ResponseWriter) {
+	result := s.db.Save(model)
+	if result.Error != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err := json.NewEncoder(w).Encode(model)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) deleteModel(model interface{}, w http.ResponseWriter) {
+	result := s.db.Delete(model)
+	if result.Error != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if result.RowsAffected == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
