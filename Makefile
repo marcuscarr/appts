@@ -42,6 +42,10 @@ coverage: ## Run the tests of the project and export the coverage
 	$(GOTEST) -cover -covermode=count -coverprofile=profile.cov ./...
 	$(GOCMD) tool cover -func profile.cov
 
+## Formatting:
+tidy:
+	gofumpt -l -w .
+
 ## Lint:
 lint: lint-go lint-dockerfile lint-yaml ## Run all available linters
 

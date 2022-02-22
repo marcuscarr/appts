@@ -38,10 +38,10 @@ func newApptHandler(db *gorm.DB) *apptHandler {
 		modelHandler: newModelHandler(
 			db, &models.Appt{}, "id",
 			[]queries{
-				{"user_id", "="},
-				{"trainer_id", "="},
-				{"start_time", ">="},
-				{"end_time", "<"},
+				{userIDParam, "="},
+				{trainerIDParam, "="},
+				{startTimeParam, ">="},
+				{endTimeParam, "<"},
 			},
 		),
 		validator: validate,
@@ -61,7 +61,7 @@ func (ah *apptHandler) create(w http.ResponseWriter, r *http.Request) {
 	if err := validAppt(ah.validator, appt); err != nil {
 		log.Printf("Invalid appt: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
@@ -99,7 +99,7 @@ func (ah *apptHandler) create(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if txErr != nil {
-		w.Write([]byte(txErr.Error()))
+		_, _ = w.Write([]byte(txErr.Error()))
 		return
 	}
 
@@ -111,7 +111,7 @@ func (ah *apptHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (ah *apptHandler) updateAppt(w http.ResponseWriter, r *http.Request) {
+func (ah *apptHandler) update(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	idValue := vars[apptIDParam]
 	id, err := strconv.Atoi(idValue)
@@ -140,7 +140,7 @@ func (ah *apptHandler) updateAppt(w http.ResponseWriter, r *http.Request) {
 
 	if err := validAppt(ah.validator, appt); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
@@ -169,7 +169,7 @@ func (ah *apptHandler) updateAppt(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if txErr != nil {
-		w.Write([]byte(txErr.Error()))
+		_, _ = w.Write([]byte(txErr.Error()))
 		return
 	}
 

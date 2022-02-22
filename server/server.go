@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +27,8 @@ const (
 	userIDParam    = "user_id"
 	startsAtParam  = "starts_at"
 	endsAtParam    = "ends_at"
+	startTimeParam = "start_time"
+	endTimeParam   = "end_time"
 )
 
 type Server struct {
@@ -188,7 +189,11 @@ func (s *Server) Run() {
 	defer cancel()
 
 	// Doesn't block if no connections, but will otherwise wait until the timeout deadline.
-	s.Shutdown(ctx)
+	err := s.Shutdown(ctx)
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
 
 	log.Println("shutting down")
 	os.Exit(0)
@@ -196,7 +201,7 @@ func (s *Server) Run() {
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	_, _ = w.Write([]byte("OK"))
 }
 
 func close(closers ...io.Closer) {
@@ -212,73 +217,4 @@ func close(closers ...io.Closer) {
 	}
 
 	wg.Wait()
-}
-
-func (s *Server) insertModel(w http.ResponseWriter, model interface{}) {
-	result := s.db.Create(model)
-	if result.Error != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err := json.NewEncoder(w).Encode(model)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusCreated)
-}
-
-func (s *Server) getModel(w http.ResponseWriter, model interface{}, idValue string) {
-	id, err := strconv.Atoi(idValue)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	result := s.db.First(model, id)
-	if result.Error != nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	err = json.NewEncoder(w).Encode(model)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-func (s *Server) updateModel(model interface{}, w http.ResponseWriter) {
-	result := s.db.Save(model)
-	if result.Error != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err := json.NewEncoder(w).Encode(model)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-func (s *Server) deleteModel(model interface{}, w http.ResponseWriter) {
-	result := s.db.Delete(model)
-	if result.Error != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	if result.RowsAffected == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
 }

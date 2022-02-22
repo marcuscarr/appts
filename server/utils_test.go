@@ -32,7 +32,7 @@ func TestBuildAvailable(t *testing.T) {
 	expected := []time.Time{
 		time.Date(2020, 1, 1, 9, 30, 0, 0, location),
 		time.Date(2020, 1, 1, 10, 30, 0, 0, location),
-		time.Date(2020, 1, 1, 12, 00, 0, 0, location),
+		time.Date(2020, 1, 1, 12, 0o0, 0, 0, location),
 		time.Date(2020, 1, 1, 12, 30, 0, 0, location),
 	}
 
@@ -137,7 +137,7 @@ func TestValidAppt(t *testing.T) {
 				UserID:    1,
 				TrainerID: 1,
 				StartTime: time.Date(2020, 1, 1, 9, 0, 0, 0, location),
-				EndTime:   time.Date(2020, 1, 1, 10, 00, 0, 0, location),
+				EndTime:   time.Date(2020, 1, 1, 10, 0o0, 0, 0, location),
 			},
 			errors.New("appt duration must be 30 minutes"),
 		},

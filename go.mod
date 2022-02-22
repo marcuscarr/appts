@@ -5,7 +5,6 @@ go 1.17
 require (
 	github.com/go-playground/validator v9.31.0+incompatible
 	github.com/gorilla/mux v1.8.0
-	github.com/gorilla/schema v1.2.0
 	gorm.io/driver/postgres v1.3.1
 	gorm.io/gorm v1.23.1
 )
